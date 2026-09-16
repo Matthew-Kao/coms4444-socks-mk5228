@@ -12,8 +12,8 @@ invisible to the simulator - no error, just a player that never turns up.
 This directory is not itself discovered - the registry only matches
 ``player_<digits>`` - so the template can never appear in a run as a competitor.
 """
+
 from itertools import combinations
-from core.engine import PACK_COST
 
 from models.player import GameContext, PlayerSnapshot, Selection, TurnContext
 from models.player import Player as BasePlayer
@@ -99,24 +99,24 @@ class Player9(BasePlayer):
         discards nothing. It is recorded as a fault and shown in the results, so a
         forfeit is visible rather than silent. Your failure never affects the
         other groups.
-        """        
+        """
         self.days_seen += 1
 
         # Replace everything below with your strategy. This baseline wears the
         # first two socks it is handed and never discards, which is the
         # do-nothing behaviour a real strategy should beat.
 
-        l, r = min(
+        left, right = min(
             combinations(range(len(offered)), 2), key=lambda p: abs(offered[p[0]] - offered[p[1]])
         )
 
         dis = []
 
         for i in range(len(offered)):
-            if i in (l,r):
+            if i in (left, right):
                 pass
             else:
                 if offered[i] > 10 and offered[i] < 250:
                     dis.append(i)
 
-        return Selection(wear=(l, r), discard=(dis))
+        return Selection(wear=(left, right), discard=(dis))
