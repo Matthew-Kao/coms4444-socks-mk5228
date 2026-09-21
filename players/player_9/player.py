@@ -38,6 +38,8 @@ class Player9(BasePlayer):
 		# itself - you cannot preload state into an already-built object. Anything
 		# you want to carry between days lives on self, so initialise it here.
 		self.days_seen = 0
+		self.white_seen = []
+		self.black_seen = []
 
 	def select_socks(self, offered: tuple[int, ...], turn: TurnContext) -> Selection:
 		"""Choose two socks to wear, and decide the fate of the rest.
@@ -105,18 +107,43 @@ class Player9(BasePlayer):
 		# Replace everything below with your strategy. This baseline wears the
 		# first two socks it is handed and never discards, which is the
 		# do-nothing behaviour a real strategy should beat.
-
 		left, right = min(
 			combinations(range(len(offered)), 2), key=lambda p: abs(offered[p[0]] - offered[p[1]])
 		)
 
+		# Differentiate between white and black socks
+		for s in offered:
+			if s > 64:
+				self.white_seen.append(s)
+			else:
+				self.black_seen.append(s)
+
+		self.white_seen = self.white_seen[-200:]
+		self.black_seen = self.black_seen[-200:]
+
+		# Estimated average shade
+		w_avg = sum(self.white_seen) / len(self.white_seen) if self.white_seen else 190
+
+		b_avg = sum(self.black_seen) / len(self.black_seen) if self.black_seen else 32
+
+		print(f'white average: {w_avg}, black average: {b_avg}')
+
 		dis = []
 
-		for i in range(len(offered)):
-			if i in (left, right):
-				pass
-			else:
-				if offered[i] > 10 and offered[i] < 250:
-					dis.append(i)
+		# If our budget has ran out, there isn't any benefit to discarding
+		if turn.budget_remaining >= 10:
+			leftovers = [k for k in range(len(offered)) if k not in (left, right)]
 
-		return Selection(wear=(left, right), discard=(dis))
+			if leftovers:
+
+				def dist(k):
+					target = w_avg if offered[k] > 64 else b_avg
+					return abs(offered[k] - target)
+
+				worst = max(leftovers, key=dist)
+
+				# If the shade is more than 6 away from the average, discard
+				if dist(worst) > 6:
+					dis.append(worst)
+
+		return Selection(wear=(left, right), discard=tuple(dis))
