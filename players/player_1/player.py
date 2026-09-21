@@ -19,7 +19,7 @@ from models.player import GameContext, PlayerSnapshot, Selection, TurnContext
 from models.player import Player as BasePlayer
 
 
-class Player9(BasePlayer):
+class Player1(BasePlayer):
 	"""Rename me to Player<k>, where <k> is your group number."""
 
 	def __init__(self, snapshot: PlayerSnapshot, ctx: GameContext) -> None:
@@ -38,9 +38,6 @@ class Player9(BasePlayer):
 		# itself - you cannot preload state into an already-built object. Anything
 		# you want to carry between days lives on self, so initialise it here.
 		self.days_seen = 0
-		self.total_budget = None
-		self.lower_bound = 64
-		self.upper_bound = 128
 
 	def select_socks(self, offered: tuple[int, ...], turn: TurnContext) -> Selection:
 		"""Choose two socks to wear, and decide the fate of the rest.
@@ -108,39 +105,19 @@ class Player9(BasePlayer):
 		# Replace everything below with your strategy. This baseline wears the
 		# first two socks it is handed and never discards, which is the
 		# do-nothing behaviour a real strategy should beat.
+		is_white = [int(sock >= 127) for sock in offered]
+		num_white = sum(is_white)
 
-		# Pick the two closest socks
-		left, right = min(
-			combinations(range(len(offered)), 2), key=lambda p: abs(offered[p[0]] - offered[p[1]])
-		)
+		if num_white == 2:
+			black_indices = []
+			for index, val in enumerate(is_white):
+				if val == 0:
+					black_indices.append(index)
+			i, j = black_indices[0], black_indices[1]
+		else:
+			i, j = min(
+				combinations(range(len(offered)), 2),
+				key=lambda p: abs(offered[p[0]] - offered[p[1]]),
+			)
 
-		dis = []
-		can_discard = False
-		# Initialize total_budget
-		if self.total_budget is None:
-			self.total_budget = turn.total_spent + turn.budget_remaining
-
-		# Monitor budget activity for the first 20 days, don't discard anything
-		if turn.day > 20 and turn.budget_remaining > 0:
-			can_discard = True
-			remaining_days = self.days - turn.day + 1
-			remaining_average = turn.budget_remaining / remaining_days
-			total_average = self.total_budget / self.days
-
-			# If we are underspending, loosen restrictions on discards
-			if remaining_average > total_average:
-				self.lower_bound = max(0, self.lower_bound - 5)
-				self.upper_bound = min(255, self.upper_bound + 10)
-			# If we are overspending, tighten restrictions on discards
-			elif remaining_average < total_average:
-				self.lower_bound = min(255, self.lower_bound + 5)
-				self.upper_bound = max(0, self.upper_bound - 10)
-
-		for i in range(len(offered)):
-			if i in (left, right):
-				pass
-			else:
-				if can_discard and offered[i] > self.lower_bound and offered[i] < self.upper_bound:
-					dis.append(i)
-
-		return Selection(wear=(left, right), discard=(dis))
+		return Selection(wear=(i, j), discard=())

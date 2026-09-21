@@ -13,13 +13,19 @@ This directory is not itself discovered - the registry only matches
 ``player_<digits>`` - so the template can never appear in a run as a competitor.
 """
 
-from itertools import combinations
-
 from models.player import GameContext, PlayerSnapshot, Selection, TurnContext
 from models.player import Player as BasePlayer
 
+THRESHOLD = 6
+BUCKETS = 8
+HIST_DECAY = 0.985
+PACK_COST = 10.0
+WHITE_CUTOFF = 200
+ENDGAME_START = 0.8
+ENDGAME_RESERVE = 0.2
 
-class Player9(BasePlayer):
+
+class Player6(BasePlayer):
 	"""Rename me to Player<k>, where <k> is your group number."""
 
 	def __init__(self, snapshot: PlayerSnapshot, ctx: GameContext) -> None:
@@ -38,9 +44,57 @@ class Player9(BasePlayer):
 		# itself - you cannot preload state into an already-built object. Anything
 		# you want to carry between days lives on self, so initialise it here.
 		self.days_seen = 0
-		self.total_budget = None
-		self.lower_bound = 64
-		self.upper_bound = 128
+		self.white_hist = [1.0] * BUCKETS
+		self.black_hist = [1.0] * BUCKETS
+		self.estimated_budget = None
+
+	def _is_black(self, shade: int) -> bool:
+		return shade <= 64
+
+	def _bucket(self, shade: int) -> int:
+		value = shade / 65 if self._is_black(shade) else (shade - 127) / 129
+		index = int(value * BUCKETS)
+		if index < 0:
+			return 0
+		if index >= BUCKETS:
+			return BUCKETS - 1
+		return index
+
+	def _update_histograms(self, offered: tuple[int, ...]) -> None:
+		for hist in (self.white_hist, self.black_hist):
+			for i in range(BUCKETS):
+				hist[i] *= HIST_DECAY
+
+		for shade in offered:
+			hist = self.black_hist if self._is_black(shade) else self.white_hist
+			hist[self._bucket(shade)] += 1.0
+
+	def _compatibility(self, shade: int) -> float:
+		hist = self.black_hist if self._is_black(shade) else self.white_hist
+		total = sum(hist)
+		return hist[self._bucket(shade)] / total if total else 0.0
+
+	def _embarrassment(self, a: int, b: int) -> int:
+		diff = abs(a - b)
+		return 0 if diff <= THRESHOLD else diff
+
+	def _budget_allows_discard(self, turn: TurnContext) -> bool:
+		if turn.budget_remaining == float('inf'):
+			return True
+
+		current_budget = turn.total_spent + turn.budget_remaining
+		if self.estimated_budget is None or current_budget > self.estimated_budget:
+			self.estimated_budget = current_budget
+
+		if turn.budget_remaining < PACK_COST:
+			return False
+
+		progress = turn.day / self.days if self.days else 1.0
+		if progress < ENDGAME_START or self.estimated_budget is None:
+			return True
+
+		reserve = self.estimated_budget * ENDGAME_RESERVE
+		return turn.budget_remaining - PACK_COST >= reserve
 
 	def select_socks(self, offered: tuple[int, ...], turn: TurnContext) -> Selection:
 		"""Choose two socks to wear, and decide the fate of the rest.
@@ -104,43 +158,37 @@ class Player9(BasePlayer):
 		other groups.
 		"""
 		self.days_seen += 1
+		self._update_histograms(offered)
 
-		# Replace everything below with your strategy. This baseline wears the
-		# first two socks it is handed and never discards, which is the
-		# do-nothing behaviour a real strategy should beat.
-
-		# Pick the two closest socks
-		left, right = min(
-			combinations(range(len(offered)), 2), key=lambda p: abs(offered[p[0]] - offered[p[1]])
-		)
-
-		dis = []
-		can_discard = False
-		# Initialize total_budget
-		if self.total_budget is None:
-			self.total_budget = turn.total_spent + turn.budget_remaining
-
-		# Monitor budget activity for the first 20 days, don't discard anything
-		if turn.day > 20 and turn.budget_remaining > 0:
-			can_discard = True
-			remaining_days = self.days - turn.day + 1
-			remaining_average = turn.budget_remaining / remaining_days
-			total_average = self.total_budget / self.days
-
-			# If we are underspending, loosen restrictions on discards
-			if remaining_average > total_average:
-				self.lower_bound = max(0, self.lower_bound - 5)
-				self.upper_bound = min(255, self.upper_bound + 10)
-			# If we are overspending, tighten restrictions on discards
-			elif remaining_average < total_average:
-				self.lower_bound = min(255, self.lower_bound + 5)
-				self.upper_bound = max(0, self.upper_bound - 10)
-
+		best_pair = (0, 1)
+		best_key = None
 		for i in range(len(offered)):
-			if i in (left, right):
-				pass
-			else:
-				if can_discard and offered[i] > self.lower_bound and offered[i] < self.upper_bound:
-					dis.append(i)
+			for j in range(i + 1, len(offered)):
+				a = offered[i]
+				b = offered[j]
+				embarrassment = self._embarrassment(a, b)
+				cross_colour = self._is_black(a) != self._is_black(b)
+				closeness = abs(a - b)
+				compatibility = self._compatibility(a) + self._compatibility(b)
+				# Embarrassment is the first key, so the chosen pair always has
+				# the minimum immediate score. Later keys only break ties.
+				key = (embarrassment, cross_colour, -compatibility, closeness)
+				if best_key is None or key < best_key:
+					best_key = key
+					best_pair = (i, j)
 
-		return Selection(wear=(left, right), discard=(dis))
+		discard: list[int] = []
+		if self._budget_allows_discard(turn):
+			for i, shade in enumerate(offered):
+				if i in best_pair:
+					continue
+
+				compatibility = self._compatibility(shade)
+				black = self._is_black(shade)
+				worn_out = shade == 64 if black else shade == 127
+				white_too_old = not black and shade < WHITE_CUTOFF
+
+				if worn_out or white_too_old or compatibility < 0.08:
+					discard.append(i)
+
+		return Selection(wear=best_pair, discard=tuple(discard))
