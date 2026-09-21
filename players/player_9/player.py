@@ -1,26 +1,20 @@
-"""Starting point for a group's player.
-
-Copy this whole directory to ``players/player_<k>/`` using your group number,
-then rename the class to ``Player<k>``. Group 4 would end up with
-``players/player_4/player.py`` containing ``class Player4``. The registry looks
-for exactly that; nothing else needs editing.
-
-Keep the ``__init__.py``. Discovery uses ``pkgutil.iter_modules``, which only
-reports directories that have one, so a group directory without it is silently
-invisible to the simulator - no error, just a player that never turns up.
-
-This directory is not itself discovered - the registry only matches
-``player_<digits>`` - so the template can never appear in a run as a competitor.
-"""
+"""Group 9 player: greedy pairing with budget-paced, drawer-aware discards."""
 
 from itertools import combinations
 
 from models.player import GameContext, PlayerSnapshot, Selection, TurnContext
 from models.player import Player as BasePlayer
 
+BASE_THRESHOLD = 6.0
+MIN_THRESHOLD = 2.0
+
 
 class Player9(BasePlayer):
-	"""Rename me to Player<k>, where <k> is your group number."""
+	"""Greedy pairing; discard the leftover furthest from its colour's average.
+
+	Budget pacing can only make discarding more aggressive when the household is
+	underspending - it never shuts discarding off when others overspend.
+	"""
 
 	def __init__(self, snapshot: PlayerSnapshot, ctx: GameContext) -> None:
 		super().__init__(snapshot, ctx)
@@ -37,9 +31,10 @@ class Player9(BasePlayer):
 		# The engine constructs you once, before day 1, and it constructs you
 		# itself - you cannot preload state into an already-built object. Anything
 		# you want to carry between days lives on self, so initialise it here.
-		self.days_seen = 0
 		self.white_seen = []
 		self.black_seen = []
+		self.total_budget = None
+		self.threshold = BASE_THRESHOLD
 
 	def select_socks(self, offered: tuple[int, ...], turn: TurnContext) -> Selection:
 		"""Choose two socks to wear, and decide the fate of the rest.
@@ -102,48 +97,55 @@ class Player9(BasePlayer):
 		forfeit is visible rather than silent. Your failure never affects the
 		other groups.
 		"""
-		self.days_seen += 1
-
-		# Replace everything below with your strategy. This baseline wears the
-		# first two socks it is handed and never discards, which is the
-		# do-nothing behaviour a real strategy should beat.
-		left, right = min(
-			combinations(range(len(offered)), 2), key=lambda p: abs(offered[p[0]] - offered[p[1]])
-		)
-
-		# Differentiate between white and black socks
+		# Keep track of the color of White and Black socks
 		for s in offered:
 			if s > 64:
 				self.white_seen.append(s)
 			else:
 				self.black_seen.append(s)
 
+		# We only want recent samples, here I have set to last 200 samples
 		self.white_seen = self.white_seen[-200:]
 		self.black_seen = self.black_seen[-200:]
 
-		# Estimated average shade
-		w_avg = sum(self.white_seen) / len(self.white_seen) if self.white_seen else 190
+		left, right = min(
+			combinations(range(len(offered)), 2), key=lambda p: abs(offered[p[0]] - offered[p[1]])
+		)
 
+		# Find the average color of each sock
+		w_avg = sum(self.white_seen) / len(self.white_seen) if self.white_seen else 190
 		b_avg = sum(self.black_seen) / len(self.black_seen) if self.black_seen else 32
 
-		print(f'white average: {w_avg}, black average: {b_avg}')
+		if self.total_budget is None:
+			self.total_budget = turn.total_spent + turn.budget_remaining
+
+		# Kevin's idea, after watching 20 days, loosen when underspending, vice versa
+		if turn.day > 20:
+			remaining_days = self.days - turn.day + 1
+			remaining_avg = turn.budget_remaining / remaining_days
+			total_avg = self.total_budget / self.days
+			# Underspending
+			if remaining_avg > total_avg:
+				self.threshold = max(MIN_THRESHOLD, self.threshold - 1)
+			# Overspending
+			elif remaining_avg < total_avg:
+				self.threshold = min(BASE_THRESHOLD, self.threshold + 1)
 
 		dis = []
 
-		# If our budget has ran out, there isn't any benefit to discarding
+		# If our budget is less than 10, I argue there's no point in discarding
 		if turn.budget_remaining >= 10:
 			leftovers = [k for k in range(len(offered)) if k not in (left, right)]
-
 			if leftovers:
 
 				def dist(k):
 					target = w_avg if offered[k] > 64 else b_avg
 					return abs(offered[k] - target)
 
+				# Discard the leftover furthest from its colour's average,
+				# with a dynamic threshold based on spending patterns
 				worst = max(leftovers, key=dist)
-
-				# If the shade is more than 6 away from the average, discard
-				if dist(worst) > 6:
+				if dist(worst) > self.threshold:
 					dis.append(worst)
 
 		return Selection(wear=(left, right), discard=tuple(dis))
