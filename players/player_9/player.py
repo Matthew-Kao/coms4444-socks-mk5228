@@ -13,10 +13,29 @@ This directory is not itself discovered - the registry only matches
 ``player_<digits>`` - so the template can never appear in a run as a competitor.
 """
 
+import math
 from itertools import combinations
 
+from core.engine import EMBARRASSMENT_THRESHOLD, PACK_COST
 from models.player import GameContext, PlayerSnapshot, Selection, TurnContext
 from models.player import Player as BasePlayer
+from models.sock import BLACK_CEILING, WHITE_FADE, WHITE_FLOOR, WHITE_START
+
+# Below this much money left (but still enough for a pack) the budget counts as low:
+# a share of the total budget, but never less than a fixed floor
+MIN_BUDGET_FRACTION = 0.1
+MIN_BUDGET_FLOOR = 100.0
+# Shades at which a sock has a chance of developing a hole when worn
+WORN_OUT = (WHITE_FLOOR, BLACK_CEILING)
+
+
+def is_black(shade: int) -> bool:
+	return shade <= BLACK_CEILING
+
+
+def wears(shade: int) -> float:
+	"""How many times a sock has been worn. White fades 2 per wear, black rises 1."""
+	return shade if is_black(shade) else (WHITE_START - shade) / WHITE_FADE
 
 
 class Player9(BasePlayer):
@@ -109,16 +128,33 @@ class Player9(BasePlayer):
 		# first two socks it is handed and never discards, which is the
 		# do-nothing behaviour a real strategy should beat.
 
-		# Pick the two closest socks
-		left, right = min(
-			combinations(range(len(offered)), 2), key=lambda p: abs(offered[p[0]] - offered[p[1]])
-		)
-
-		dis = []
-		can_discard = False
 		# Initialize total_budget
 		if self.total_budget is None:
 			self.total_budget = turn.total_spent + turn.budget_remaining
+
+		# No budget means no money for a pack, or no budget set at all
+		broke = turn.budget_remaining < PACK_COST
+		no_budget = broke or math.isinf(turn.budget_remaining)
+		min_budget = max(MIN_BUDGET_FLOOR, MIN_BUDGET_FRACTION * self.total_budget)
+		low_budget = not no_budget and turn.budget_remaining < min_budget
+
+		def preference(p: tuple[int, int]) -> tuple[int, float, int, float, int]:
+			a, b = offered[p[0]], offered[p[1]]
+			diff = abs(a - b)
+			cost = diff if diff > EMBARRASSMENT_THRESHOLD else 0
+			# Prefer black socks over white when the budget is low
+			whites = (not is_black(a)) + (not is_black(b)) if low_budget else 0
+			# Prefer young socks over old when the budget is low or gone
+			age = wears(a) + wears(b) if low_budget or no_budget else 0
+			# A worn-out sock can get a hole, and with no money it is never replaced
+			hole_risk = (a in WORN_OUT) + (b in WORN_OUT) if broke else 0
+			return (hole_risk, cost, whites, age, diff)
+
+		# Pick the least embarrassing pair, then the preferred one, then the two closest socks
+		left, right = min(combinations(range(len(offered)), 2), key=preference)
+
+		dis = []
+		can_discard = False
 
 		# Monitor budget activity for the first 20 days, don't discard anything
 		if turn.day > 20 and turn.budget_remaining > 0:
