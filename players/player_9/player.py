@@ -1,19 +1,43 @@
-"""Group 9 player: greedy pairing with budget-paced, drawer-aware discards."""
+"""Group 9 player: budget-aware pairing, with discards sized by what the budget can afford."""
 
+import math
 from itertools import combinations
 
+from core.engine import EMBARRASSMENT_THRESHOLD, PACK_COST
 from models.player import GameContext, PlayerSnapshot, Selection, TurnContext
 from models.player import Player as BasePlayer
+from models.sock import BLACK_CEILING, WHITE_FADE, WHITE_FLOOR, WHITE_START
 
-BASE_THRESHOLD = 6.0
-MIN_THRESHOLD = 2.0
+# Below this much money left (but still enough for a pack) the budget counts as low:
+# a share of the total budget, but never less than a fixed floor
+MIN_BUDGET_FRACTION = 0.1
+MIN_BUDGET_FLOOR = 100.0
+# Shades at which a sock has a chance of developing a hole when worn
+WORN_OUT = (WHITE_FLOOR, BLACK_CEILING)
+# Socks in a pack, and how many recent shades we keep as a picture of the drawer
+PACK_SIZE = 6
+SAMPLE_WINDOW = 200
+
+
+def is_black(shade: int) -> bool:
+	return shade <= BLACK_CEILING
+
+
+def wears(shade: int) -> float:
+	"""How many times a sock has been worn. White fades 2 per wear, black rises 1."""
+	return shade if is_black(shade) else (WHITE_START - shade) / WHITE_FADE
 
 
 class Player9(BasePlayer):
-	"""Greedy pairing; discard the leftover furthest from its colour's average.
+	"""Budget-aware pair preference, with discards chosen by how far a leftover
+	sits from its own colour's running average.
 
-	Budget pacing can only make discarding more aggressive when the household is
-	underspending - it never shuts discarding off when others overspend.
+	How far is "too far" is not a constant. The money left and the days left
+	give the socks a day the household can still afford to replace; our share of
+	that is the fraction of the socks we are handed that we can afford to bin.
+	We then set the cut at the distance that leaves roughly that fraction of the
+	shades we have sampled outside it - so a tight budget bins only the worst
+	outliers, and an unlimited one bins everything we are not wearing.
 	"""
 
 	def __init__(self, snapshot: PlayerSnapshot, ctx: GameContext) -> None:
@@ -31,10 +55,10 @@ class Player9(BasePlayer):
 		# The engine constructs you once, before day 1, and it constructs you
 		# itself - you cannot preload state into an already-built object. Anything
 		# you want to carry between days lives on self, so initialise it here.
+
+		self.total_budget = None
 		self.white_seen = []
 		self.black_seen = []
-		self.total_budget = None
-		self.threshold = BASE_THRESHOLD
 
 	def select_socks(self, offered: tuple[int, ...], turn: TurnContext) -> Selection:
 		"""Choose two socks to wear, and decide the fate of the rest.
@@ -97,55 +121,70 @@ class Player9(BasePlayer):
 		forfeit is visible rather than silent. Your failure never affects the
 		other groups.
 		"""
-		# Keep track of the color of White and Black socks
+		# Keep count of each color 
 		for s in offered:
-			if s > 64:
-				self.white_seen.append(s)
-			else:
+			if is_black(s):
 				self.black_seen.append(s)
+			else:
+				self.white_seen.append(s)
 
-		# We only want recent samples, here I have set to last 200 samples
-		self.white_seen = self.white_seen[-200:]
-		self.black_seen = self.black_seen[-200:]
-
-		left, right = min(
-			combinations(range(len(offered)), 2), key=lambda p: abs(offered[p[0]] - offered[p[1]])
-		)
-
-		# Find the average color of each sock
-		w_avg = sum(self.white_seen) / len(self.white_seen) if self.white_seen else 190
-		b_avg = sum(self.black_seen) / len(self.black_seen) if self.black_seen else 32
+		# Only include samples in the last SAMPLE_WINDOW days
+		self.white_seen = self.white_seen[-SAMPLE_WINDOW:]
+		self.black_seen = self.black_seen[-SAMPLE_WINDOW:]
 
 		if self.total_budget is None:
 			self.total_budget = turn.total_spent + turn.budget_remaining
 
-		# Kevin's idea, after watching 20 days, loosen when underspending, vice versa
-		if turn.day > 20:
-			remaining_days = self.days - turn.day + 1
-			remaining_avg = turn.budget_remaining / remaining_days
-			total_avg = self.total_budget / self.days
-			# Underspending
-			if remaining_avg > total_avg:
-				self.threshold = max(MIN_THRESHOLD, self.threshold - 1)
-			# Overspending
-			elif remaining_avg < total_avg:
-				self.threshold = min(BASE_THRESHOLD, self.threshold + 1)
+		# No budget means no money for a pack, or no budget set at all
+		broke = turn.budget_remaining < PACK_COST
+		no_budget = broke or math.isinf(turn.budget_remaining)
+		min_budget = max(MIN_BUDGET_FLOOR, MIN_BUDGET_FRACTION * self.total_budget)
+		low_budget = not no_budget and turn.budget_remaining < min_budget
+
+		def preference(p: tuple[int, int]) -> tuple[int, float, int, float, int]:
+			a, b = offered[p[0]], offered[p[1]]
+			diff = abs(a - b)
+			cost = diff if diff > EMBARRASSMENT_THRESHOLD else 0
+			# Prefer black socks over white when the budget is low
+			whites = (not is_black(a)) + (not is_black(b)) if low_budget else 0
+			# Prefer young socks over old when the budget is low or gone
+			age = wears(a) + wears(b) if low_budget or no_budget else 0
+			# A worn-out sock can get a hole, and with no money it is never replaced
+			hole_risk = (a in WORN_OUT) + (b in WORN_OUT) if broke else 0
+			return (hole_risk, cost, whites, age, diff)
+
+		# Pick the least embarrassing pair, then the preferred one, then the two closest socks
+		left, right = min(combinations(range(len(offered)), 2), key=preference)
+
+		# Running estimate of the middle of each colour pool
+		w_avg = sum(self.white_seen) / len(self.white_seen) if self.white_seen else WHITE_START
+		b_avg = sum(self.black_seen) / len(self.black_seen) if self.black_seen else 0
+
+		# Fraction of socks a single roomate can afford to replace
+		remaining_days = self.days - turn.day + 1
+		affordable = (turn.budget_remaining / remaining_days) / PACK_COST * PACK_SIZE
+		share = affordable / (self.roommates * self.selection_unit)
+
+		# Array of distances between each sock and its sampled average
+		distances = sorted(
+			[abs(s - w_avg) for s in self.white_seen] + [abs(s - b_avg) for s in self.black_seen]
+		)
+		if share >= 1:
+			bound = 0.0
+		elif share <= 0 or not distances:
+			bound = math.inf
+		else:
+			bound = distances[min(len(distances) - 1, int((1 - share) * len(distances)))]
 
 		dis = []
 
-		# If our budget is less than 10, I argue there's no point in discarding
-		if turn.budget_remaining >= 10:
-			leftovers = [k for k in range(len(offered)) if k not in (left, right)]
-			if leftovers:
-
-				def dist(k):
-					target = w_avg if offered[k] > 64 else b_avg
-					return abs(offered[k] - target)
-
-				# Discard the leftover furthest from its colour's average,
-				# with a dynamic threshold based on spending patterns
-				worst = max(leftovers, key=dist)
-				if dist(worst) > self.threshold:
-					dis.append(worst)
+		# If we can afford to buy atleast one pack, run discard logic with bound
+		if turn.budget_remaining >= PACK_COST:
+			for i in range(len(offered)):
+				if i in (left, right):
+					continue
+				target = b_avg if is_black(offered[i]) else w_avg
+				if abs(offered[i] - target) > bound:
+					dis.append(i)
 
 		return Selection(wear=(left, right), discard=tuple(dis))
