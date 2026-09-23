@@ -25,6 +25,17 @@ from models.sock import BLACK_CEILING, WHITE_FADE, WHITE_FLOOR, WHITE_START
 # a share of the total budget, but never less than a fixed floor
 MIN_BUDGET_FRACTION = 0.1
 MIN_BUDGET_FLOOR = 100.0
+# Discard socks by how often they have been worn, which reads the same for both colours
+# (each tops out at 64 wears). Start at "well worn", loosen while underspending but never
+# below the floor, so a nearly new sock is never thrown out
+START_MIN_WEARS = 48
+MIN_WEARS_FLOOR = 16
+MAX_WEARS = 64
+# Bigger budgets can afford to replace socks sooner, so the floor shrinks in proportion
+# once the budget per roommate per day passes the reference (about $600 for 4 roommates
+# over 720 days), but never below LOWEST_MIN_WEARS
+REF_BUDGET_PER_ROOMMATE_DAY = 600 / (4 * 720)
+LOWEST_MIN_WEARS = 4
 # Shades at which a sock has a chance of developing a hole when worn
 WORN_OUT = (WHITE_FLOOR, BLACK_CEILING)
 
@@ -58,8 +69,8 @@ class Player9(BasePlayer):
 		# you want to carry between days lives on self, so initialise it here.
 		self.days_seen = 0
 		self.total_budget = None
-		self.lower_bound = 64
-		self.upper_bound = 128
+		self.min_wears = START_MIN_WEARS
+		self.min_wears_floor = MIN_WEARS_FLOOR
 
 	def select_socks(self, offered: tuple[int, ...], turn: TurnContext) -> Selection:
 		"""Choose two socks to wear, and decide the fate of the rest.
@@ -131,6 +142,9 @@ class Player9(BasePlayer):
 		# Initialize total_budget
 		if self.total_budget is None:
 			self.total_budget = turn.total_spent + turn.budget_remaining
+			per_roommate_day = self.total_budget / (self.roommates * self.days)
+			scaled = MIN_WEARS_FLOOR * REF_BUDGET_PER_ROOMMATE_DAY / max(per_roommate_day, 1e-9)
+			self.min_wears_floor = max(LOWEST_MIN_WEARS, min(MIN_WEARS_FLOOR, round(scaled)))
 
 		# No budget means no money for a pack, or no budget set at all
 		broke = turn.budget_remaining < PACK_COST
@@ -163,20 +177,19 @@ class Player9(BasePlayer):
 			remaining_average = turn.budget_remaining / remaining_days
 			total_average = self.total_budget / self.days
 
-			# If we are underspending, loosen restrictions on discards
-			if remaining_average > total_average:
-				self.lower_bound = max(0, self.lower_bound - 5)
-				self.upper_bound = min(255, self.upper_bound + 10)
+			# If we are underspending (always, with no budget set), loosen restrictions on discards
+			if math.isinf(turn.budget_remaining) or remaining_average > total_average:
+				self.min_wears = max(self.min_wears_floor, self.min_wears - 1)
 			# If we are overspending, tighten restrictions on discards
 			elif remaining_average < total_average:
-				self.lower_bound = min(255, self.lower_bound + 5)
-				self.upper_bound = max(0, self.upper_bound - 10)
+				self.min_wears = min(MAX_WEARS, self.min_wears + 1)
 
 		for i in range(len(offered)):
 			if i in (left, right):
 				pass
 			else:
-				if can_discard and offered[i] > self.lower_bound and offered[i] < self.upper_bound:
+				# Only discard socks worn enough times; newer ones stay in the drawer
+				if can_discard and wears(offered[i]) >= self.min_wears:
 					dis.append(i)
 
 		return Selection(wear=(left, right), discard=(dis))
