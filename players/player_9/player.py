@@ -13,13 +13,16 @@ This directory is not itself discovered - the registry only matches
 ``player_<digits>`` - so the template can never appear in a run as a competitor.
 """
 
-from itertools import combinations
-
 from models.player import GameContext, PlayerSnapshot, Selection, TurnContext
 from models.player import Player as BasePlayer
+from models.sock import BLACK_CEILING, WHITE_FADE, WHITE_START
+
+from .budget import BudgetMethods
+from .discarding import DiscardMethods
+from .pairing import PairingMethods
 
 
-class Player9(BasePlayer):
+class Player9(BudgetMethods, PairingMethods, DiscardMethods, BasePlayer):
 	"""Rename me to Player<k>, where <k> is your group number."""
 
 	def __init__(self, snapshot: PlayerSnapshot, ctx: GameContext) -> None:
@@ -37,16 +40,27 @@ class Player9(BasePlayer):
 		# The engine constructs you once, before day 1, and it constructs you
 		# itself - you cannot preload state into an already-built object. Anything
 		# you want to carry between days lives on self, so initialise it here.
-		self.days_seen = 0
+		self.days_remaining = self.days + 1
+		self.budget_by_day = []
+		self.black_bound = 64
+		self.white_bound = 127
+		self.budget_velocity = 0
+		self.contains_bad_actor = False
+		self.broke = False
+		self.no_budget = False
+		self.low_budget = False
+
+
+	def is_black(self, shade: int) -> bool:
+		return shade <= BLACK_CEILING
+
+	def wears(self, shade: int) -> float:
+		"""How many times a sock has been worn. White fades 2 per wear, black rises 1."""
+		return shade if self.is_black(shade) else (WHITE_START - shade) / WHITE_FADE
+
 
 	def select_socks(self, offered: tuple[int, ...], turn: TurnContext) -> Selection:
-		"""Choose two socks to wear, and decide the fate of the rest.
-
-		Called once per day, in an order that is reshuffled daily. Everything you
-		are allowed to know is in the two arguments.
-
-		``offered`` is a tuple of ``selection_unit`` shade values, 0-255.
-
+		"""
 		WHAT YOU CAN SEE
 
 			offered[i]                  the shade of the i-th sock on offer
@@ -55,68 +69,15 @@ class Player9(BasePlayer):
 			turn.embarrassment_history  your own daily scores, one per day
 			turn.total_embarrassment    the sum of that history
 			self.capacity / self.roommates / self.selection_unit / self.days
-
-		WHAT YOU CANNOT SEE
-
-			- Which sock is which. Indices are positions in THIS tuple only. The
-				same index tomorrow is a different sock, so you cannot track an
-				individual sock across turns or build up a map of the drawer.
-			- Anyone else's socks, choices or embarrassment.
-			- The shade distribution left in the drawer.
-			- How many socks have been discarded, or how close the household is to
-				the next six-pack. You see total_spent only, after the fact.
-
-		With n == 1 you are alone with the drawer, so tracking its full state IS
-		possible. That is intentional, not a leak - it is what makes the pooled
-		versus separate comparison in goal 3 meaningful.
-
-		WHAT THE SHADES MEAN
-
-		White socks start at 255 and fade by 2 per wear, stopping at 127. Black
-		socks start at 0 and rise by 1 per wear, stopping at 64. The two ranges
-		never overlap, so a shade above 64 is a white sock and a shade at or below
-		64 is a black one. Inferring colour from shade is fair game.
-
-		Wearing a pair whose shades differ by MORE than 6 costs you that
-		difference. A difference of exactly 6 is free.
-
-		A sock already at 127 or 64 when you are handed it has a 25% chance of
-		developing a hole when worn, and is thrown out immediately. Six discards
-		of one colour buy a fresh six-pack for $10, and the surplus carries over.
-
-		RETURNING A DECISION
-
-			wear     exactly two distinct indices into ``offered``
-			discard  any subset of the REMAINING indices, possibly empty
-
-		Anything you neither wear nor discard goes back in the drawer unworn and
-		keeps its shade. Only worn socks age.
-
-		IF YOU GET IT WRONG
-
-		An invalid selection, an exception, or taking longer than the --timeout
-		budget forfeits your turn: the engine wears the first two socks and
-		discards nothing. It is recorded as a fault and shown in the results, so a
-		forfeit is visible rather than silent. Your failure never affects the
-		other groups.
 		"""
-		self.days_seen += 1
 
-		# Replace everything below with your strategy. This baseline wears the
-		# first two socks it is handed and never discards, which is the
-		# do-nothing behaviour a real strategy should beat.
+		SPPPD, projected_error = self._update_budget(turn)
 
-		left, right = min(
-			combinations(range(len(offered)), 2), key=lambda p: abs(offered[p[0]] - offered[p[1]])
-		)
+		#picking socks to wear
+		left, right = self._choose_wear(offered)
 
-		dis = []
+		self._adjust_budget(turn, SPPPD, projected_error)
 
-		for i in range(len(offered)):
-			if i in (left, right):
-				pass
-			else:
-				if offered[i] > 10 and offered[i] < 250:
-					dis.append(i)
+		dis = self._choose_discards(offered, left, right)
 
-		return Selection(wear=(left, right), discard=(dis))
+		return Selection(wear=(left, right), discard=(tuple(dis)))
