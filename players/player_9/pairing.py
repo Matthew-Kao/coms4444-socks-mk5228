@@ -26,8 +26,7 @@ class PairingMethods:
 			return (hole_risk, cost, whites, age, diff)
 
 		# Pick the least embarrassing pair, then the preferred one, then the two closest socks
-		return (min(combinations(range(len(offered)), 2), key=preference))
-	
+		return min(combinations(range(len(offered)), 2), key=preference)
 
 	def _choose_greedy_wear(self, offered: tuple[int, ...]) -> tuple[int, int]:
 		left, right = min(

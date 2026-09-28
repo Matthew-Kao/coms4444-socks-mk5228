@@ -4,10 +4,8 @@
 class DiscardMethods:
 	"""Methods for choosing which un-worn socks to discard."""
 
-	def _choose_discards(
-		self, offered: tuple[int, ...], left: int, right: int
-	) -> list[int]:
-		#choosing discarded socks
+	def _choose_discards(self, offered: tuple[int, ...], left: int, right: int) -> list[int]:
+		# choosing discarded socks
 		dis = []
 		for i in range(len(offered)):
 			if i in (left, right):
