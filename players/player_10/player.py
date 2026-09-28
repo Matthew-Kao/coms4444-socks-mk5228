@@ -13,6 +13,7 @@ This directory is not itself discovered - the registry only matches
 ``player_<digits>`` - so the template can never appear in a run as a competitor.
 """
 
+import math
 from itertools import combinations
 
 from core.engine import PACK_COST
@@ -41,11 +42,12 @@ class Player10(BasePlayer):
 		# itself - you cannot preload state into an already-built object. Anything
 		# you want to carry between days lives on self, so initialise it here.
 		self.days_seen = 0
+		self.replacements_seen = False
 
 	def aging(self, shade: int) -> int:
 		# check how much a sock has aged
 		if shade >= 127:  # white sock
-			return 255 - shade
+			return (255 - shade) / 2
 		else:  # black sock
 			return shade
 
@@ -112,41 +114,62 @@ class Player10(BasePlayer):
 		"""
 		self.days_seen += 1
 
-		# check for all pairs within threshold of 6 since embarrassment is 0 for anything less than 6
-		pairs_within_threshold = [
-			p
-			for p in combinations(range(len(offered)), 2)
-			if abs(offered[p[0]] - offered[p[1]]) <= THRESHOLD
-		]
-		if pairs_within_threshold:  # if there are pairs that fall within 6
-			# take the most extreme pair like closest to 255 since we want it to become more grey and uniform - white socks
-			i, j = min(
-				pairs_within_threshold,
-				key=lambda p: self.aging(offered[p[0]]) + self.aging(offered[p[1]]),
-			)
-		else:
-			# if there are no pairs within threshold, be greedy
-			i, j = min(
-				combinations(range(len(offered)), 2),
-				key=lambda p: abs(offered[p[0]] - offered[p[1]]),
-			)
+		# Generate every possible pair of offered socks
+		all_pairs = list(combinations(range(len(offered)), 2))
 
-		worn = (offered[i] + offered[j]) / 2
+		# Calculate the actual embarrassment of a pair:
+		# differences of 6 or less all count as 0 embarrassment
+		def embarrassment(p):
+			difference = abs(offered[p[0]] - offered[p[1]])
+			return 0 if difference <= THRESHOLD else difference
+
+		# Find the lowest possible embarrassment this turn
+		min_embarrassment = min(embarrassment(p) for p in all_pairs)
+
+		# Keep every pair tied for that lowest embarrassment
+		best_pairs = [p for p in all_pairs if embarrassment(p) == min_embarrassment]
+
+		# Among equally good embarrassment choices:
+		# 1. prefer the pair with the greatest total aging
+		# 2. if still tied, prefer the pair with average shade closest to 0
+		i, j = min(
+			best_pairs,
+			key=lambda p: (
+				-(self.aging(offered[p[0]]) + self.aging(offered[p[1]])),
+				(offered[p[0]] + offered[p[1]]) / 2,
+			),
+		)
+
+		chosen_age = max(self.aging(offered[i]), self.aging(offered[j]))
+		if turn.total_spent > 0:
+			self.replacements_seen = True
 
 		discard: list[int] = []
 		days_remaining = max(self.days - turn.day + 1, 1)
 
 		# check if we have an inf budget, otherwise we add a variable to pace our spending based on days remaining and budget remaining
-		if turn.budget_remaining == 'inf':
-			buy_pack = True
+		if turn.budget_remaining is None or turn.budget_remaining == float('inf'):
+			age_threshold = 0
+		elif turn.budget_remaining < PACK_COST:
+			age_threshold = float('inf')
 		else:
-			daily_rate = turn.budget_remaining / days_remaining
-			buy_pack = daily_rate >= (PACK_COST / 6)
+			age_threshold = math.ceil(
+				(10 * days_remaining * self.roommates) / (3 * turn.budget_remaining)
+			)
 
-		if turn.budget_remaining >= PACK_COST and buy_pack:
+		if self.replacements_seen and turn.budget_remaining >= PACK_COST:
 			leftovers = [k for k in range(len(offered)) if k not in (i, j)]
-			worst = max(leftovers, key=lambda k: abs(offered[k] - worn))
-			if abs(offered[worst] - worn) > THRESHOLD:
-				discard.append(worst)
+			# wait a week before discarding, dont want to discard too early but just put a week for now
+			if leftovers:
+				# discard socks that have ageed 15 units and are beyond threshold - need to fix this later to account more for future distribution
+				discardable = [
+					k
+					for k in leftovers
+					if self.aging(offered[k]) >= age_threshold
+					and self.aging(offered[k]) > chosen_age
+				]
+				# if you can discard something take the worst and discard it
+				if discardable:
+					discard.extend(discardable)
 
 		return Selection(wear=(i, j), discard=(tuple(discard)))
