@@ -21,7 +21,7 @@ from models.sock import BLACK_CEILING, WHITE_FADE, WHITE_START
 from .budget import BudgetMethods
 from .discarding import DiscardMethods
 from .pairing import PairingMethods
-
+#fixed lint
 
 class Player9(BudgetMethods, PairingMethods, DiscardMethods, BasePlayer):
 	"""Rename me to Player<k>, where <k> is your group number."""
