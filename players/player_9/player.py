@@ -52,6 +52,7 @@ class Player9(BudgetMethods, PairingMethods, DiscardMethods, BasePlayer):
 		self.low_budget = False
 		self.discard_high = 0
 		self.mixed_mode = False
+
 	def is_black(self, shade: int) -> bool:
 		return shade <= BLACK_CEILING
 
@@ -87,11 +88,8 @@ class Player9(BudgetMethods, PairingMethods, DiscardMethods, BasePlayer):
 		self.discard_high = max(self.discard_high, proposed_high)
 		discard_low = self.discard_high // 2
 
-
 		if turn.day == 60 and turn.total_spent >= 10:
 			self.mixed_mode = True
-
-
 
 		# picking socks to wear
 		left, right = self._choose_wear(offered)
