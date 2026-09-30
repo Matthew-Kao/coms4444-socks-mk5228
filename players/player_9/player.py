@@ -21,7 +21,7 @@ from models.sock import BLACK_CEILING, WHITE_FADE, WHITE_START
 from .budget import BudgetMethods
 from .discarding import DiscardMethods
 from .pairing import PairingMethods
-#fixed lint
+
 
 class Player9(BudgetMethods, PairingMethods, DiscardMethods, BasePlayer):
 	"""Rename me to Player<k>, where <k> is your group number."""
@@ -31,7 +31,7 @@ class Player9(BudgetMethods, PairingMethods, DiscardMethods, BasePlayer):
 
 		# super() has already set these from ctx and snapshot:
 		#
-		#   self.index           which roommate you are (0-based)
+		#   self.index           which roommate you are (0-based))
 		#   self.id              your UUID, stable for the whole simulation
 		#   self.capacity        C, the drawer size at the start
 		#   self.roommates       n, how many of you share the drawer
